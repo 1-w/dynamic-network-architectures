@@ -147,6 +147,116 @@ class StackedConvBlocks(nn.Module):
         return output
 
 
+class HeteromodalInputBlock(nn.Module):
+    def __init__(self,
+                 num_convs: int,
+                 conv_op: Type[_ConvNd],
+                 input_channels: int,
+                 output_channels: Union[int, List[int], Tuple[int, ...]],
+                 kernel_size: Union[int, List[int], Tuple[int, ...]],
+                 initial_stride: Union[int, List[int], Tuple[int, ...]],
+                 conv_bias: bool = False,
+                 norm_op: Union[None, Type[nn.Module]] = None,
+                 norm_op_kwargs: dict = None,
+                 dropout_op: Union[None, Type[_DropoutNd]] = None,
+                 dropout_op_kwargs: dict = None,
+                 nonlin: Union[None, Type[torch.nn.Module]] = None,
+                 nonlin_kwargs: dict = None,
+                 nonlin_first: bool = False
+                 ):
+        """
+
+        :param conv_op:
+        :param num_convs:
+        :param input_channels:
+        :param output_channels: can be int or a list/tuple of int. If list/tuple are provided, each entry is for
+        one conv. The length of the list/tuple must then naturally be num_convs
+        :param kernel_size:
+        :param initial_stride:
+        :param conv_bias:
+        :param norm_op:
+        :param norm_op_kwargs:
+        :param dropout_op:
+        :param dropout_op_kwargs:
+        :param nonlin:
+        :param nonlin_kwargs:
+        """
+        super().__init__()
+        if not isinstance(output_channels, (tuple, list)):
+            output_channels = [output_channels] * num_convs
+            
+        if nonlin is not None:
+            self.nonlin = nonlin(**nonlin_kwargs)
+        else:
+            self.nonlin = None
+
+        self.multi_blocks = []
+        
+        for _ in range(input_channels):
+            self.multi_blocks.append(
+                nn.Sequential(
+                ConvDropoutNormReLU(
+                    conv_op, 1, output_channels[0], kernel_size, initial_stride, conv_bias, norm_op,
+                    norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs, nonlin_first
+                ),
+                *[
+                    ConvDropoutNormReLU(
+                        conv_op, output_channels[i - 1], output_channels[i], kernel_size, 1, conv_bias, norm_op,
+                        norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs, nonlin_first
+                    )
+                    for i in range(1, num_convs-1)
+                    ], # last conv layer does not have nonlin !
+                    ConvDropoutNormReLU(
+                        conv_op, output_channels[num_convs-2], output_channels[num_convs-1], kernel_size, 1, conv_bias, norm_op,
+                        norm_op_kwargs, dropout_op, dropout_op_kwargs, None, nonlin_kwargs, False
+                    )
+                )
+            )
+            
+        self.multi_blocks = nn.ModuleList(self.multi_blocks)
+        self.input_channels = input_channels
+        # Initialize learneble modality weights
+        self.mod_weights = nn.Parameter(torch.ones(input_channels))
+        self.smooth_weights = nn.Softmax(dim=0)
+
+        self.output_channels = output_channels[-1]
+        self.initial_stride = maybe_convert_scalar_to_list(conv_op, initial_stride)
+
+    def forward(self, x, modality_weights=1):
+        if isinstance(modality_weights,int):
+            modality_weights = torch.Tensor([1]*self.input_channels)
+            modality_weights = modality_weights.to(x[0].device)
+            
+        missing_modalities = 1.0 * (torch.amax(x, dim=(2, 3, 4))!=0)
+        smw_ = self.smooth_weights(self.mod_weights)
+        smw_ = smw_ * missing_modalities
+        nsmw_ = torch.nn.functional.normalize(smw_, p=1, dim=1)
+        
+        x = torch.tensor_split(x, self.input_channels, dim=1)        
+        
+        
+        encoders = [self.multi_blocks[i].forward(x[i]) for i in range(self.input_channels)]
+        
+
+        hetero_block = [nsmw_[:,i].unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1) * encoders[i] for i in range(self.input_channels)]
+        
+        hetero_block = torch.sum(torch.stack(hetero_block,dim=1), dim=1)
+        
+        if self.nonlin is not None:
+            hetero_block = self.nonlin(hetero_block)
+            
+        return hetero_block
+
+    def compute_conv_feature_map_size(self, input_size):
+        assert len(input_size) == len(self.initial_stride), "just give the image size without color/feature channels or " \
+                                                            "batch channel. Do not give input_size=(b, c, x, y(, z)). " \
+                                                            "Give input_size=(x, y(, z))!"
+        output = self.multi_blocks[0][0].compute_conv_feature_map_size(input_size)
+        size_after_stride = [i // j for i, j in zip(input_size, self.initial_stride)]
+        for b in self.multi_blocks[0][1:]:
+            output += b.compute_conv_feature_map_size(size_after_stride)
+        return len(self.multi_blocks) * output
+
 if __name__ == '__main__':
     data = torch.rand((1, 3, 40, 32))
 

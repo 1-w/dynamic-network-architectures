@@ -9,11 +9,11 @@ from dynamic_network_architectures.building_blocks.simple_conv_blocks import Sta
 from dynamic_network_architectures.building_blocks.helper import get_matching_convtransp
 from dynamic_network_architectures.building_blocks.residual_encoders import ResidualEncoder
 from dynamic_network_architectures.building_blocks.plain_conv_encoder import PlainConvEncoder
-
+from dynamic_network_architectures.building_blocks.heteromodal_conv_encoder import HeteromodalConvEncoder
 
 class UNetDecoder(nn.Module):
     def __init__(self,
-                 encoder: Union[PlainConvEncoder, ResidualEncoder],
+                 encoder: Union[PlainConvEncoder, ResidualEncoder, HeteromodalConvEncoder],
                  num_classes: int,
                  n_conv_per_stage: Union[int, Tuple[int, ...], List[int]],
                  deep_supervision,
