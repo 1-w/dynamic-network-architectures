@@ -190,31 +190,32 @@ class HeteromodalInputBlock(nn.Module):
         else:
             self.nonlin = None
 
-        self.multi_blocks = []
+        multi_blocks = []
         
         for _ in range(input_channels):
-            self.multi_blocks.append(
+            multi_blocks.append(
                 nn.Sequential(
-                ConvDropoutNormReLU(
-                    conv_op, 1, output_channels[0], kernel_size, initial_stride, conv_bias, norm_op,
-                    norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs, nonlin_first
-                ),
-                *[
                     ConvDropoutNormReLU(
-                        conv_op, output_channels[i - 1], output_channels[i], kernel_size, 1, conv_bias, norm_op,
+                        conv_op, 1, output_channels[0], kernel_size, initial_stride, conv_bias, norm_op,
                         norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs, nonlin_first
-                    )
-                    for i in range(1, num_convs-1)
-                    ], # last conv layer does not have nonlin !
-                    ConvDropoutNormReLU(
-                        conv_op, output_channels[num_convs-2], output_channels[num_convs-1], kernel_size, 1, conv_bias, norm_op,
-                        norm_op_kwargs, dropout_op, dropout_op_kwargs, None, nonlin_kwargs, False
-                    )
-                )
+                    ),
+                    *[
+                        ConvDropoutNormReLU(
+                            conv_op, output_channels[i - 1], output_channels[i], kernel_size, 1, conv_bias, norm_op,
+                            norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs, nonlin_first
+                        )
+                        for i in range(1, num_convs-1)
+                    ],ConvDropoutNormReLU(
+                            conv_op, output_channels[num_convs - 2], output_channels[num_convs-1], kernel_size, 1, conv_bias, norm_op,
+                            norm_op_kwargs, dropout_op, dropout_op_kwargs, nonlin, nonlin_kwargs, nonlin_first
+                        )
+        )
+                
             )
             
-        self.multi_blocks = nn.ModuleList(self.multi_blocks)
+        self.multi_blocks = nn.ModuleList(multi_blocks)
         self.input_channels = input_channels
+        
         # Initialize learneble modality weights
         self.mod_weights = nn.Parameter(torch.ones(input_channels))
         self.smooth_weights = nn.Softmax(dim=0)
@@ -222,29 +223,22 @@ class HeteromodalInputBlock(nn.Module):
         self.output_channels = output_channels[-1]
         self.initial_stride = maybe_convert_scalar_to_list(conv_op, initial_stride)
 
-    def forward(self, x, modality_weights=1):
-        if isinstance(modality_weights,int):
-            modality_weights = torch.Tensor([1]*self.input_channels)
-            modality_weights = modality_weights.to(x[0].device)
-            
+    def forward(self, x):            
         missing_modalities = 1.0 * (torch.amax(x, dim=(2, 3, 4))!=0)
         smw_ = self.smooth_weights(self.mod_weights)
         smw_ = smw_ * missing_modalities
         nsmw_ = torch.nn.functional.normalize(smw_, p=1, dim=1)
-        
-        x = torch.tensor_split(x, self.input_channels, dim=1)        
-        
-        
-        encoders = [self.multi_blocks[i].forward(x[i]) for i in range(self.input_channels)]
-        
 
-        hetero_block = [nsmw_[:,i].unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1) * encoders[i] for i in range(self.input_channels)]
-        
+        x = torch.tensor_split(x, self.input_channels, dim=1)
+        encoders = [self.multi_blocks[i](x[i]) for i in range(len(self.multi_blocks))]
+
+        hetero_block = [nsmw_[:,i].unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1).unsqueeze(dim=-1) * encoders[i] for i in range(len(encoders))]
+
         hetero_block = torch.sum(torch.stack(hetero_block,dim=1), dim=1)
-        
+
         if self.nonlin is not None:
             hetero_block = self.nonlin(hetero_block)
-            
+                        
         return hetero_block
 
     def compute_conv_feature_map_size(self, input_size):
